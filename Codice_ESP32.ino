@@ -1,85 +1,98 @@
 #include "BluetoothSerial.h"
 #include "FS.h"
-#include "SD_MMC.h"  // Cambiato da SD.h a SD_MMC.h
+#include "SD_MMC.h"  // Utilizza interfaccia MMC per prestazioni migliori
 #include "SPI.h"
 #include <ESP32Servo.h>
 
-// ===== CONFIGURAZIONE PIN =====
-#define TRIG_PIN 0        // Pin trigger sensore ultrasuoni (ripristinato dal primo file)
-#define ECHO_PIN 33       // Pin echo sensore ultrasuoni (ripristinato dal primo file)
-#define SERVO_PIN 13      // Pin controllo servo motore
 
-// ===== CONFIGURAZIONE SD_MMC (dal primo file) =====
-#define SD_MMC_CMD 15     // Non cambiare
-#define SD_MMC_CLK 14     // Non cambiare
-#define SD_MMC_D0 2       // Non cambiare
+// ===== CONFIGURAZIONE PIN =====
+#define TRIG_PIN 0        // Trigger sensore ultrasuoni - genera impulso 10µs
+#define ECHO_PIN 33       // Echo sensore ultrasuoni - riceve risposta temporizzata
+#define SERVO_PIN 13      // PWM per controllo servo motore sbarra
+
+
+// ===== CONFIGURAZIONE SD_MMC =====
+#define SD_MMC_CMD 15     // Linea comando SD - protocollo MMC
+#define SD_MMC_CLK 14     // Clock sincronizzazione dati
+#define SD_MMC_D0 2       // Linea dati 0 (modalità 1-bit)
+
 
 // ===== CONFIGURAZIONE SENSORE =====
-#define DISTANCE_THRESHOLD 20    // cm - distanza massima per rilevare veicolo (modificato)
-#define MIN_DETECTION_TIME 3000  // ms - tempo minimo presenza per attivare sistema
-#define MAX_DISTANCE 400         // cm - distanza massima sensore (filtro errori)
+#define DISTANCE_THRESHOLD 20    // Soglia rilevamento veicolo (cm)
+#define MIN_DETECTION_TIME 3000  // Filtro anti-rimbalzo per conferma presenza (ms)
+#define MAX_DISTANCE 400         // Limite massimo lettura valida sensore (cm)
+
 
 // ===== CONFIGURAZIONE DIAGNOSTICA SENSORE =====
-#define SENSOR_TEST_SAMPLES 10      // numero campioni per test diagnostico
-#define SENSOR_ERROR_THRESHOLD 5    // errori consecutivi per segnalare malfunzionamento
-#define SENSOR_TIMEOUT_US 30000     // timeout lettura sensore in microsecondi
-#define SENSOR_MIN_DISTANCE 2       // cm - distanza minima valida
-#define SENSOR_STABILITY_SAMPLES 5  // campioni per test stabilità
-#define SENSOR_VARIANCE_THRESHOLD 10 // cm - varianza massima accettabile per stabilità
+#define SENSOR_TEST_SAMPLES 10      // Campioni per test affidabilità
+#define SENSOR_ERROR_THRESHOLD 5    // Errori consecutivi prima di segnalare guasto
+#define SENSOR_TIMEOUT_US 30000     // Timeout lettura ultrasuoni (30ms)
+#define SENSOR_MIN_DISTANCE 2       // Distanza minima fisica valida (cm)
+#define SENSOR_STABILITY_SAMPLES 5  // Campioni per calcolo stabilità
+#define SENSOR_VARIANCE_THRESHOLD 10 // Varianza massima per sensore stabile (cm)
+
 
 // ===== CONFIGURAZIONE SERVO =====
-#define SERVO_CLOSED_ANGLE 0     // gradi - angolo sbarra chiusa
-#define SERVO_OPEN_ANGLE 90      // gradi - angolo sbarra aperta  
-#define GATE_OPEN_DURATION 5000  // ms - tempo apertura sbarra (5 secondi - modificato)
-#define GATE_DELAY_CLOSE 5000    // ms - ritardo chiusura dopo che sensore non rileva più (nuovo)
+#define SERVO_CLOSED_ANGLE 0     // Posizione sbarra chiusa (gradi)
+#define SERVO_OPEN_ANGLE 90      // Posizione sbarra aperta (gradi)
+#define GATE_OPEN_DURATION 5000  // Tempo massimo apertura (sicurezza)
+#define GATE_DELAY_CLOSE 5000    // Ritardo chiusura dopo uscita veicolo
+
 
 // ===== CONFIGURAZIONE SICUREZZA =====
-#define MAX_AUTH_ATTEMPTS 3      // tentativi massimi per sessione
-#define AUTH_TIMEOUT 10000       // ms - timeout autenticazione (10 sec)
+#define MAX_AUTH_ATTEMPTS 3      // Limite tentativi per sessione (anti-brute force)
+#define AUTH_TIMEOUT 10000       // Timeout autenticazione utente (ms)
+
 
 BluetoothSerial SerialBT;
 Servo gateServo;
 
-// ===== VARIABILI GLOBALI =====
-bool vehiclePresent = false;
-bool authenticationInProgress = false;
-bool gateIsOpen = false;
-unsigned long vehicleDetectedTime = 0;
-unsigned long vehicleLeftTime = 0;    // nuovo - quando il veicolo se ne va
-unsigned long gateOpenedTime = 0;
-unsigned long authStartTime = 0;
-String currentUser = "";
-int authAttempts = 0;
-int messageCount = 0;  // nuovo - per statistiche bluetooth
-bool sdCardAvailable = false;  // nuovo - stato scheda SD
+
+// ===== VARIABILI STATO SISTEMA =====
+bool vehiclePresent = false;           // Flag presenza veicolo
+bool authenticationInProgress = false; // Flag sessione autenticazione attiva
+bool gateIsOpen = false;              // Stato attuale sbarra
+unsigned long vehicleDetectedTime = 0; // Timestamp primo rilevamento
+unsigned long vehicleLeftTime = 0;     // Timestamp uscita veicolo
+unsigned long gateOpenedTime = 0;      // Timestamp apertura sbarra
+unsigned long authStartTime = 0;       // Timestamp inizio autenticazione
+String currentUser = "";               // Username sessione corrente
+int authAttempts = 0;                 // Contatore tentativi falliti
+int messageCount = 0;                 // Statistiche messaggi Bluetooth
+bool sdCardAvailable = false;         // Flag disponibilità storage persistente
+
 
 // ===== VARIABILI DIAGNOSTICA SENSORE =====
-bool sensorHealthy = true;
-int consecutiveErrors = 0;
-unsigned long totalReadings = 0;
-unsigned long errorReadings = 0;
-unsigned long lastSensorTest = 0;
-float lastValidDistance = -1;
-bool sensorCalibrated = false;
+bool sensorHealthy = true;            // Stato generale sensore
+int consecutiveErrors = 0;            // Contatore errori sequenziali
+unsigned long totalReadings = 0;      // Totale letture effettuate
+unsigned long errorReadings = 0;      // Totale letture errate
+unsigned long lastSensorTest = 0;     // Timestamp ultimo test diagnostico
+float lastValidDistance = -1;         // Ultima lettura valida per reference
+bool sensorCalibrated = false;        // Flag calibrazione completata
 
-// ===== STATISTICHE SENSORE =====
+
+// ===== STRUTTURA STATISTICHE SENSORE =====
 struct SensorStats {
-  unsigned long totalMeasurements;
-  unsigned long errorCount;
-  unsigned long timeoutCount;
-  float minDistance;
-  float maxDistance;
-  float avgDistance;
-  unsigned long lastResetTime;
+  unsigned long totalMeasurements;    // Contatore misurazioni totali
+  unsigned long errorCount;           // Contatore errori generali
+  unsigned long timeoutCount;         // Contatore timeout specifici
+  float minDistance;                  // Distanza minima rilevata
+  float maxDistance;                  // Distanza massima rilevata
+  float avgDistance;                  // Media mobile delle distanze
+  unsigned long lastResetTime;       // Timestamp ultimo reset statistiche
 };
 SensorStats sensorStats = {0, 0, 0, 999.0, 0.0, 0.0, 0};
 
-// ===== DATABASE IN MEMORIA (fallback senza SD) =====
+
+// ===== DATABASE FALLBACK IN MEMORIA =====
 struct MemoryUser {
   String username;
   String password;
 };
 
+
+// Database hardcoded per funzionamento senza SD
 MemoryUser memoryUsers[] = {
   {"nico", "nico"},
   {"leo", "leo"},
@@ -88,41 +101,45 @@ MemoryUser memoryUsers[] = {
   {"spezzino", "dimerda"}
 };
 
+
 const int NUM_MEMORY_USERS = sizeof(memoryUsers) / sizeof(memoryUsers[0]);
 
-// ===== STATI DEL SISTEMA =====
+
+// ===== MACCHINA A STATI SISTEMA =====
 enum SystemState {
-  IDLE_STATE,
-  VEHICLE_DETECTED,
-  REQUEST_USERNAME,
-  REQUEST_PASSWORD,
-  ACCESS_GRANTED,
-  ACCESS_DENIED,
-  GATE_OPERATING,
-  GATE_WAITING_CLOSE,  // nuovo - attesa prima della chiusura
-  SENSOR_ERROR         // nuovo - stato errore sensore
+  IDLE_STATE,           // Sistema in attesa
+  VEHICLE_DETECTED,     // Veicolo rilevato, verifica in corso
+  REQUEST_USERNAME,     // Richiesta credenziali utente
+  REQUEST_PASSWORD,     // Richiesta password
+  ACCESS_GRANTED,       // Autenticazione riuscita
+  ACCESS_DENIED,        // Autenticazione fallita
+  GATE_OPERATING,       // Sbarra in movimento/aperta
+  GATE_WAITING_CLOSE,   // Countdown per chiusura automatica
+  SENSOR_ERROR          // Errore critico sensore
 };
 
+
 SystemState currentSystemState = IDLE_STATE;
+
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
  
+  // Banner informativo sistema
   Serial.println("=================================");
-  Serial.println("  SISTEMA CONTROLLO ACCESSI");
-  Serial.println("  Progetto Scolastico ESP32");
-  Serial.println("  Versione con Diagnostica Sensore");
+  Serial.println("  SISTEMA AUTENTIFICAZIONE ACCESSO");
+  Serial.println("  Progetto con ESP32");
   Serial.println("=================================");
  
   // ===== INIZIALIZZAZIONE BLUETOOTH =====
-  SerialBT.begin("ESP32_Controllo_Accessi");
+  SerialBT.begin("ESP32_Controllo_Accessi"); // Nome device visibile
   Serial.println("✓ Bluetooth attivo: ESP32_Controllo_Accessi");
  
-  // ===== INIZIALIZZAZIONE SENSORE ULTRASUONI =====
+  // ===== CONFIGURAZIONE SENSORE ULTRASUONI =====
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
-  digitalWrite(TRIG_PIN, LOW);
+  digitalWrite(TRIG_PIN, LOW); // Stato iniziale trigger basso
   Serial.println("✓ Sensore ultrasuoni configurato (soglia: " + String(DISTANCE_THRESHOLD) + "cm)");
  
   // ===== TEST INIZIALE SENSORE =====
@@ -138,12 +155,13 @@ void setup() {
  
   // ===== INIZIALIZZAZIONE SERVO =====
   gateServo.attach(SERVO_PIN);
-  gateServo.write(SERVO_CLOSED_ANGLE);
+  gateServo.write(SERVO_CLOSED_ANGLE); // Posizione iniziale chiusa
   Serial.println("✓ Servo sbarra posizionato (chiuso)");
  
-  // ===== INIZIALIZZAZIONE MICROSD (configurazione dal primo file) =====
-  SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+  // ===== INIZIALIZZAZIONE MICROSD =====
+  SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0); // Configurazione pin MMC
   if(!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 5)) {
+    // Fallback: sistema continua senza storage persistente
     Serial.println("⚠️ ATTENZIONE: MicroSD non rilevata!");
     Serial.println("  Sistema funzionerà con database in memoria");
     Serial.println("  Le credenziali NON saranno salvate permanentemente");
@@ -152,6 +170,7 @@ void setup() {
     sdCardAvailable = true;
     Serial.println("✓ MicroSD inizializzata correttamente");
    
+    // Verifica tipo scheda per debugging
     uint8_t cardType = SD_MMC.cardType();
     if(cardType == CARD_NONE){
       Serial.println("⚠️ No SD_MMC card attached");
@@ -163,12 +182,12 @@ void setup() {
     }
   }
  
-  // ===== VERIFICA/CREAZIONE DATABASE =====
+  // ===== SETUP DATABASE UTENTI =====
   initializeDatabase(sdCardAvailable);
  
   // ===== INIZIALIZZAZIONE STATISTICHE =====
   sensorStats.lastResetTime = millis();
-  sensorStats.minDistance = 999.0;
+  sensorStats.minDistance = 999.0; // Valore iniziale alto per rilevare vero minimo
  
   Serial.println("=================================");
   Serial.println("SISTEMA PRONTO!");
@@ -178,146 +197,153 @@ void setup() {
   Serial.println("- sensor, calibrate, reset-sensor");
   Serial.println("=================================");
  
-  // Messaggio di benvenuto via Bluetooth
+  // Messaggio benvenuto via Bluetooth
   SerialBT.println("SISTEMA:Bluetooth connesso - Sistema Controllo Accessi");
   SerialBT.println("SISTEMA:Diagnostica sensore: " + String(sensorHealthy ? "OK" : "ERRORE"));
   SerialBT.println("SISTEMA:Digita 'help' per comandi di test");
 }
 
+
 void loop() {
-  // Controlla presenza veicolo con sensore
+  // Polling continuo presenza veicolo
   checkVehicleDetection();
  
-  // Gestisce la macchina a stati
+  // Gestione transizioni stati sistema
   handleSystemStates();
  
-  // Processa messaggi Bluetooth (sia per autenticazione che per test)
+  // Processing messaggi Bluetooth (autenticazione + comandi debug)
   processBluetoothMessages();
  
-  // Controlla timeout e timer
+  // Controllo timer e timeout critici
   checkTimeouts();
  
-  // Diagnostica periodica sensore (ogni 30 secondi)
+  // Diagnostica periodica sensore (ogni 30s)
   if (millis() - lastSensorTest > 30000) {
     checkSensorHealth();
     lastSensorTest = millis();
   }
  
-  delay(50); // Piccola pausa per ottimizzare performance
+  delay(50); // Pausa per ottimizzazione CPU e stabilità letture
 }
+
 
 // ===== FUNZIONI SENSORE ULTRASUONI =====
 void checkVehicleDetection() {
-  long distance = measureDistance();
+  long distance = measureDistance(); // Lettura distanza corrente
  
-  // Aggiorna statistiche
-  updateSensorStats(distance);
+  updateSensorStats(distance); // Aggiornamento statistiche continue
  
-  // Filtra letture errate
+  // Filtro letture valide (elimina spike e errori)
   if (distance > 0 && distance < MAX_DISTANCE) {
    
     if (distance <= DISTANCE_THRESHOLD) {
-      // Veicolo rilevato
+      // VEICOLO RILEVATO
       if (!vehiclePresent) {
         vehiclePresent = true;
-        vehicleDetectedTime = millis();
-        vehicleLeftTime = 0; // reset timer uscita
+        vehicleDetectedTime = millis(); // Timestamp primo rilevamento
+        vehicleLeftTime = 0; // Reset timer uscita
         Serial.println("📡 Veicolo rilevato a " + String(distance) + " cm");
        
-        // Reset errori consecutivi se lettura valida
+        // Reset contatore errori su lettura valida
         consecutiveErrors = 0;
         if (!sensorHealthy && consecutiveErrors == 0) {
           Serial.println("✅ Sensore sembra essere tornato funzionante");
           sensorHealthy = true;
           if (currentSystemState == SENSOR_ERROR) {
-            currentSystemState = IDLE_STATE;
+            currentSystemState = IDLE_STATE; // Recupero automatico
           }
         }
       }
      
-      // Controlla se veicolo presente abbastanza a lungo
+      // Controllo persistenza presenza (filtro anti-rimbalzo)
       if (millis() - vehicleDetectedTime > MIN_DETECTION_TIME &&
           currentSystemState == IDLE_STATE && sensorHealthy) {
-        startAuthenticationProcess();
+        startAuthenticationProcess(); // Avvia sequenza autenticazione
       }
     } else {
-      // Nessun veicolo
+      // NESSUN VEICOLO PRESENTE
       if (vehiclePresent) {
         vehiclePresent = false;
-        vehicleLeftTime = millis(); // segna quando il veicolo se ne va
+        vehicleLeftTime = millis(); // Timestamp uscita per timer chiusura
         Serial.println("📡 Veicolo non più presente - avvio timer chiusura");
        
-        // Se sbarra è aperta, inizia countdown per chiusura
+        // Gestione transizione stato per chiusura ritardata
         if (gateIsOpen && currentSystemState == GATE_OPERATING) {
           currentSystemState = GATE_WAITING_CLOSE;
         }
-        // Se non in autenticazione, reset
-        else if (!authenticationInProgress) {
+        // Reset solo se non in attesa di chiusura e non in autenticazione
+        else if (currentSystemState != GATE_WAITING_CLOSE && !authenticationInProgress) {
           resetToIdle();
         }
       }
     }
   } else {
-    // Lettura errata - incrementa contatore errori
+    // LETTURA ERRATA - gestione errori
     consecutiveErrors++;
     if (consecutiveErrors >= SENSOR_ERROR_THRESHOLD) {
       if (sensorHealthy) {
         Serial.println("❌ ERRORE SENSORE: Troppi errori consecutivi!");
         SerialBT.println("SISTEMA:⚠️ ERRORE SENSORE RILEVATO!");
         sensorHealthy = false;
-        currentSystemState = SENSOR_ERROR;
+        currentSystemState = SENSOR_ERROR; // Blocca sistema per sicurezza
       }
     }
   }
 }
 
+
 long measureDistance() {
-  totalReadings++;
+  totalReadings++; // Contatore statistiche
  
-  // Impulso trigger
+  // Generazione impulso trigger (protocollo HC-SR04)
   digitalWrite(TRIG_PIN, LOW);
-  delayMicroseconds(2);
+  delayMicroseconds(2);  // Pausa pre-impulso
   digitalWrite(TRIG_PIN, HIGH);
-  delayMicroseconds(10);
+  delayMicroseconds(10); // Impulso trigger 10µs
   digitalWrite(TRIG_PIN, LOW);
  
-  // Misura durata echo con timeout
+  // Misurazione durata echo con timeout per evitare hang
   long duration = pulseIn(ECHO_PIN, HIGH, SENSOR_TIMEOUT_US);
  
   if (duration == 0) {
+    // Timeout - sensore non risponde
     errorReadings++;
     sensorStats.timeoutCount++;
-    return -1; // Timeout
+    return -1; // Codice errore timeout
   }
  
-  // Calcola distanza in cm
+  // Conversione tempo in distanza: v_suono = 343m/s
+  // distanza = (durata * velocità) / 2 (andata+ritorno)
   long distance = duration * 0.034 / 2;
  
-  // Verifica validità della lettura
+  // Validazione range fisico sensore
   if (distance < SENSOR_MIN_DISTANCE || distance > MAX_DISTANCE) {
     errorReadings++;
     sensorStats.errorCount++;
-    return -2; // Lettura non valida
+    return -2; // Codice errore range
   }
  
-  lastValidDistance = distance;
+  lastValidDistance = distance; // Salva per riferimento
   return distance;
 }
+
 
 // ===== FUNZIONI DIAGNOSTICA SENSORE =====
 bool performSensorDiagnostic() {
   Serial.println("🔍 Esecuzione diagnostica completa sensore...");
   SerialBT.println("SISTEMA:🔍 Test sensore in corso...");
  
+  // Contatori per analisi statistiche
   int validReadings = 0;
   int timeouts = 0;
   int invalidReadings = 0;
   float readings[SENSOR_TEST_SAMPLES];
  
-  // Esegui campionamento
+  // Campionamento multiplo per affidabilità
   for (int i = 0; i < SENSOR_TEST_SAMPLES; i++) {
     long distance = measureDistance();
    
+    // Classificazione risultato lettura
     if (distance == -1) {
       timeouts++;
     } else if (distance == -2) {
@@ -327,12 +353,13 @@ bool performSensorDiagnostic() {
       validReadings++;
     }
    
-    delay(100); // Piccola pausa tra le letture
+    delay(100); // Pausa tra campioni per stabilità
   }
  
-  // Analisi risultati
+  // Calcolo tasso successo
   float successRate = (float)validReadings / SENSOR_TEST_SAMPLES * 100;
  
+  // Report diagnostica
   Serial.println("📊 Risultati diagnostica:");
   Serial.println("   Letture valide: " + String(validReadings) + "/" + String(SENSOR_TEST_SAMPLES));
   Serial.println("   Timeout: " + String(timeouts));
@@ -342,7 +369,7 @@ bool performSensorDiagnostic() {
   SerialBT.println("SISTEMA:📊 Letture valide: " + String(validReadings) + "/" + String(SENSOR_TEST_SAMPLES));
   SerialBT.println("SISTEMA:📊 Tasso successo: " + String(successRate) + "%");
  
-  // Test stabilità se abbiamo abbastanza letture valide
+  // Test stabilità se sufficienti dati
   if (validReadings >= SENSOR_STABILITY_SAMPLES) {
     float variance = calculateVariance(readings, validReadings);
     Serial.println("   Varianza: " + String(variance) + " cm");
@@ -350,36 +377,38 @@ bool performSensorDiagnostic() {
    
     if (variance > SENSOR_VARIANCE_THRESHOLD) {
       Serial.println("⚠️ Sensore instabile - varianza troppo alta");
-      return false;
+      return false; // Fallisce test stabilità
     }
   }
  
-  // Considera il sensore OK se almeno 70% delle letture sono valide
+  // Soglia accettabilità: 70% successo minimo
   return successRate >= 70.0;
 }
 
+
 float calculateVariance(float readings[], int count) {
-  if (count < 2) return 0;
+  if (count < 2) return 0; // Serve almeno 2 campioni
  
-  // Calcola media
+  // Calcolo media aritmetica
   float sum = 0;
   for (int i = 0; i < count; i++) {
     sum += readings[i];
   }
   float mean = sum / count;
  
-  // Calcola varianza
+  // Calcolo deviazione standard
   float variance = 0;
   for (int i = 0; i < count; i++) {
     variance += pow(readings[i] - mean, 2);
   }
  
-  return sqrt(variance / (count - 1));
+  return sqrt(variance / (count - 1)); // Deviazione standard campionaria
 }
 
+
 void checkSensorHealth() {
-  // Controlla tasso di errore generale
-  if (totalReadings > 100) {
+  // Controllo tasso errore su lungo periodo
+  if (totalReadings > 100) { // Servono dati sufficienti
     float errorRate = (float)errorReadings / totalReadings * 100;
    
     if (errorRate > 30.0 && sensorHealthy) {
@@ -389,11 +418,12 @@ void checkSensorHealth() {
   }
 }
 
+
 void updateSensorStats(long distance) {
   sensorStats.totalMeasurements++;
  
   if (distance > 0) {
-    // Aggiorna min/max
+    // Aggiornamento range min/max
     if (distance < sensorStats.minDistance) {
       sensorStats.minDistance = distance;
     }
@@ -401,14 +431,16 @@ void updateSensorStats(long distance) {
       sensorStats.maxDistance = distance;
     }
    
-    // Aggiorna media mobile semplificata
+    // Media mobile esponenziale (peso 90% vecchio, 10% nuovo)
     sensorStats.avgDistance = (sensorStats.avgDistance * 0.9) + (distance * 0.1);
   } else {
-    sensorStats.errorCount++;
+    sensorStats.errorCount++; // Incrementa contatore errori
   }
 }
 
+
 void resetSensorStats() {
+  // Reset completo statistiche sensore
   sensorStats.totalMeasurements = 0;
   sensorStats.errorCount = 0;
   sensorStats.timeoutCount = 0;
@@ -417,6 +449,7 @@ void resetSensorStats() {
   sensorStats.avgDistance = 0.0;
   sensorStats.lastResetTime = millis();
  
+  // Reset contatori globali
   totalReadings = 0;
   errorReadings = 0;
   consecutiveErrors = 0;
@@ -425,15 +458,17 @@ void resetSensorStats() {
   SerialBT.println("SISTEMA:🔄 Statistiche sensore resettate");
 }
 
+
 // ===== GESTIONE STATI SISTEMA =====
 void handleSystemStates() {
+  // Switch basato su stato corrente macchina a stati
   switch (currentSystemState) {
     case IDLE_STATE:
-      // Sistema in attesa
+      // Sistema in attesa - nessuna azione richiesta
       break;
      
     case VEHICLE_DETECTED:
-      // Già gestito in checkVehicleDetection()
+      // Gestito in checkVehicleDetection()
       break;
      
     case REQUEST_USERNAME:
@@ -442,12 +477,12 @@ void handleSystemStates() {
       break;
      
     case ACCESS_GRANTED:
-      openGate();
+      openGate(); // Esegui apertura sbarra
       currentSystemState = GATE_OPERATING;
       break;
      
     case ACCESS_DENIED:
-      delay(2000); // Pausa prima di reset
+      delay(2000); // Pausa penalizzante prima reset
       resetToIdle();
       break;
      
@@ -456,26 +491,29 @@ void handleSystemStates() {
       break;
      
     case GATE_WAITING_CLOSE:
-      // Aspetta 5 secondi dopo che il veicolo se ne va, poi chiude
+      // Chiusura ritardata dopo uscita veicolo
       if (vehicleLeftTime > 0 && millis() - vehicleLeftTime > GATE_DELAY_CLOSE) {
         closeGate();
       }
       break;
      
     case SENSOR_ERROR:
-      // Sistema bloccato per errore sensore - richiede intervento manuale
+      // Sistema bloccato - richiede intervento manuale o reset forzato
       break;
   }
 }
 
+
 // ===== PROCESSO AUTENTICAZIONE =====
 void startAuthenticationProcess() {
+  // Verifica preliminare stato sensore
   if (!sensorHealthy) {
     Serial.println("⚠️ Autenticazione bloccata - sensore non funzionante");
     SerialBT.println("SISTEMA:⚠️ Servizio temporaneamente non disponibile");
     return;
   }
  
+  // Inizializzazione sessione autenticazione
   authenticationInProgress = true;
   authStartTime = millis();
   authAttempts = 0;
@@ -486,17 +524,19 @@ void startAuthenticationProcess() {
   SerialBT.println("ACCESSO:Inserisci il tuo USERNAME:");
 }
 
+
 void processBluetoothMessages() {
   if (SerialBT.available()) {
     String receivedMessage = SerialBT.readStringUntil('\n');
-    receivedMessage.trim();
+    receivedMessage.trim(); // Rimozione spazi e caratteri controllo
    
     if (receivedMessage.length() > 0) {
-      messageCount++;
+      messageCount++; // Statistiche traffico Bluetooth
       Serial.println("📱 [" + String(messageCount) + "] Ricevuto: '" + receivedMessage + "'");
      
-      // Se il sistema è in modalità autenticazione, processa le credenziali
+      // Routing messaggio basato su stato sistema
       if (currentSystemState == REQUEST_USERNAME || currentSystemState == REQUEST_PASSWORD) {
+        // MODALITÀ AUTENTICAZIONE
         switch (currentSystemState) {
           case REQUEST_USERNAME:
             handleUsernameValidation(receivedMessage);
@@ -507,71 +547,73 @@ void processBluetoothMessages() {
             break;
         }
       }
-      // Altrimenti processa i comandi di test
       else {
+        // MODALITÀ COMANDI DEBUG/TEST
         processTestCommand(receivedMessage);
       }
     }
   }
 }
 
-// ===== NUOVE FUNZIONI BLUETOOTH TEST =====
+
+// ===== FUNZIONI BLUETOOTH TEST/DEBUG =====
 void processTestCommand(String command) {
-  command.toLowerCase();
+  command.toLowerCase(); // Normalizzazione case-insensitive
  
+  // Routing comandi debug con pattern matching
   if (command == "help" || command == "aiuto") {
     showHelp();
   }
   else if (command == "test") {
-    runSystemTest();
+    runSystemTest(); // Test completo tutti i componenti
   }
   else if (command == "users" || command == "utenti") {
     showUsersViaBluetooth();
   }
   else if (command == "stats" || command == "statistiche") {
-    showStats();
+    showStats(); // Statistiche sistema e performance
   }
   else if (command == "ping") {
-    SerialBT.println("SISTEMA:PONG! Sistema attivo");
+    SerialBT.println("SISTEMA:PONG! Sistema attivo"); // Test connettività
   }
   else if (command == "status" || command == "stato") {
-    showSystemStatus();
+    showSystemStatus(); // Stato dettagliato sistema
   }
   else if (command == "sensor" || command == "sensore") {
-    showSensorDiagnostics();
+    showSensorDiagnostics(); // Report diagnostica sensore
   }
   else if (command == "calibrate" || command == "calibra") {
-    calibrateSensor();
+    calibrateSensor(); // Procedura calibrazione sensore
   }
   else if (command == "reset-sensor" || command == "reset-sensore") {
-    resetSensorStats();
+    resetSensorStats(); // Reset statistiche sensore
   }
   else if (command == "sensor-test" || command == "test-sensore") {
-    runSensorTest();
+    runSensorTest(); // Test completo sensore
   }
   else if (command.startsWith("login:")) {
-    testLogin(command);
+    testLogin(command); // Test credenziali senza attivazione sbarra
   }
   else if (command == "open" && currentSystemState == IDLE_STATE) {
-    // Comando debug per aprire manualmente la sbarra
+    // Comando debug apertura manuale
     SerialBT.println("SISTEMA:🔧 Apertura manuale sbarra (debug)");
     openGate();
     currentSystemState = GATE_OPERATING;
   }
   else if (command == "close" && gateIsOpen) {
-    // Comando debug per chiudere manualmente la sbarra
+    // Comando debug chiusura manuale
     SerialBT.println("SISTEMA:🔧 Chiusura manuale sbarra (debug)");
     closeGate();
   }
   else if (command == "force-reset" && currentSystemState == SENSOR_ERROR) {
-    // Reset forzato per uscire dallo stato errore
+    // Reset forzato per uscire da errore sensore
     SerialBT.println("SISTEMA:🔧 Reset forzato stato errore sensore");
     sensorHealthy = true;
     consecutiveErrors = 0;
     resetToIdle();
   }
   else {
-    // Se il sistema non è in autenticazione, informa dei comandi disponibili
+    // Comando non riconosciuto
     if (currentSystemState == IDLE_STATE || currentSystemState == SENSOR_ERROR) {
       SerialBT.println("SISTEMA:Comando '" + command + "' non riconosciuto");
       SerialBT.println("SISTEMA:Digita 'help' per vedere i comandi disponibili");
@@ -581,7 +623,9 @@ void processTestCommand(String command) {
   }
 }
 
+
 void showHelp() {
+  // Menu completo comandi disponibili
   SerialBT.println("SISTEMA:=== COMANDI BLUETOOTH ===");
   SerialBT.println("SISTEMA:help - Mostra questo messaggio");
   SerialBT.println("SISTEMA:test - Test completo sistema");
@@ -600,13 +644,16 @@ void showHelp() {
   SerialBT.println("SISTEMA:============================");
 }
 
+
 void showSensorDiagnostics() {
+  // Report completo stato e statistiche sensore
   SerialBT.println("SISTEMA:🔍 === DIAGNOSTICA SENSORE ===");
   SerialBT.println("SISTEMA:📊 Stato: " + String(sensorHealthy ? "FUNZIONANTE" : "ERRORE"));
   SerialBT.println("SISTEMA:📊 Letture totali: " + String(sensorStats.totalMeasurements));
   SerialBT.println("SISTEMA:📊 Errori: " + String(sensorStats.errorCount));
   SerialBT.println("SISTEMA:📊 Timeout: " + String(sensorStats.timeoutCount));
  
+  // Calcolo e visualizzazione tasso errore
   if (sensorStats.totalMeasurements > 0) {
     float errorRate = (float)sensorStats.errorCount / sensorStats.totalMeasurements * 100;
     SerialBT.println("SISTEMA:📊 Tasso errore: " + String(errorRate, 1) + "%");
@@ -621,32 +668,35 @@ void showSensorDiagnostics() {
     SerialBT.println("SISTEMA:📊 Ultima lettura: " + String(lastValidDistance) + " cm");
   }
  
+  // Calcolo e visualizzazione uptime
   unsigned long uptime = (millis() - sensorStats.lastResetTime) / 1000;
   SerialBT.println("SISTEMA:📊 Uptime sensore: " + String(uptime) + "s");
   SerialBT.println("SISTEMA:================================");
 }
 
+
 void calibrateSensor() {
   SerialBT.println("SISTEMA:🎯 Avvio calibrazione sensore...");
   SerialBT.println("SISTEMA:Assicurati che davanti al sensore sia libero");
-  delay(3000);
+  delay(3000); // Tempo per preparazione ambiente
  
-  // Esegui calibrazione con ambiente libero
+  // Array per raccolta dati calibrazione
   float calibrationReadings[10];
   int validCalibrations = 0;
  
+  // Campionamento ambiente libero per stabilire baseline
   for (int i = 0; i < 10; i++) {
     long distance = measureDistance();
     if (distance > 0 && distance < MAX_DISTANCE) {
       calibrationReadings[validCalibrations] = distance;
       validCalibrations++;
     }
-    delay(200);
+    delay(200); // Pausa tra campioni
     SerialBT.println("SISTEMA:Campione " + String(i+1) + "/10...");
   }
  
-  if (validCalibrations >= 7) {
-    // Calcola distanza ambiente libero
+  if (validCalibrations >= 7) { // Almeno 70% campioni validi
+    // Calcolo distanza media ambiente libero
     float sum = 0;
     for (int i = 0; i < validCalibrations; i++) {
       sum += calibrationReadings[i];
@@ -658,25 +708,27 @@ void calibrateSensor() {
     SerialBT.println("SISTEMA:📏 Soglia rilevamento: " + String(DISTANCE_THRESHOLD) + " cm");
    
     sensorCalibrated = true;
-    resetSensorStats(); // Reset statistiche dopo calibrazione
+    resetSensorStats(); // Reset statistiche post-calibrazione
   } else {
     SerialBT.println("SISTEMA:❌ Calibrazione fallita!");
     SerialBT.println("SISTEMA:Troppi errori di lettura sensore");
   }
 }
 
+
 void runSensorTest() {
   SerialBT.println("SISTEMA:🧪 TEST SENSORE COMPLETO...");
  
-  // Reset temporaneo contatori per test pulito
+  // Backup contatore errori per ripristino post-test
   int oldConsecutiveErrors = consecutiveErrors;
   consecutiveErrors = 0;
  
-  bool testResult = performSensorDiagnostic();
+  bool testResult = performSensorDiagnostic(); // Esegui diagnostica completa
  
   if (testResult) {
     SerialBT.println("SISTEMA:✅ SENSORE: FUNZIONANTE");
     sensorHealthy = true;
+    // Recupero automatico da stato errore se test OK
     if (currentSystemState == SENSOR_ERROR) {
       currentSystemState = IDLE_STATE;
       SerialBT.println("SISTEMA:🔄 Sistema ripristinato da errore sensore");
@@ -687,36 +739,41 @@ void runSensorTest() {
     sensorHealthy = false;
   }
  
-  // Ripristina contatore se era zero prima del test
+  // Ripristino contatore se test fallisce ma era pulito prima
   if (oldConsecutiveErrors == 0 && !testResult) {
     consecutiveErrors = oldConsecutiveErrors;
   }
 }
 
+
 void runSystemTest() {
   SerialBT.println("SISTEMA:🧪 TEST SISTEMA COMPLETO...");
   delay(500);
  
-  // Test sensore
+  // Test sensore ultrasuoni
   SerialBT.println("SISTEMA:📡 Test sensore ultrasuoni...");
   long dist = measureDistance();
   SerialBT.println("SISTEMA:📡 Distanza attuale: " + String(dist) + "cm");
   SerialBT.println("SISTEMA:📡 Stato sensore: " + String(sensorHealthy ? "OK" : "ERRORE"));
   delay(1000);
  
+  // Verifica database utenti
   SerialBT.println("SISTEMA:💾 Database: " + String(countUsers()) + " utenti (" +
                    String(sdCardAvailable ? "SD" : "memoria") + ")");
   delay(1000);
  
+  // Test servo motore con movimento completo
   SerialBT.println("SISTEMA:🚪 Test servo: apertura/chiusura");
-  gateServo.write(SERVO_OPEN_ANGLE);
+  gateServo.write(SERVO_OPEN_ANGLE);  // Apri
   delay(1000);
-  gateServo.write(SERVO_CLOSED_ANGLE);
+  gateServo.write(SERVO_CLOSED_ANGLE); // Chiudi
   delay(1000);
  
+  // Statistiche comunicazione Bluetooth
   SerialBT.println("SISTEMA:📱 Bluetooth: " + String(messageCount) + " messaggi");
   delay(1000);
  
+  // Risultato finale test
   if (sensorHealthy) {
     SerialBT.println("SISTEMA:✅ TUTTI I TEST OK!");
   } else {
@@ -724,11 +781,12 @@ void runSystemTest() {
   }
 }
 
+
 void showUsersViaBluetooth() {
   SerialBT.println("SISTEMA:👥 UTENTI NEL DATABASE:");
  
   if (sdCardAvailable) {
-    // Leggi da database.csv (nome file dal primo file)
+    // Lettura utenti da file CSV su SD
     File file = SD_MMC.open("/database.csv");
     if (file) {
       int count = 0;
@@ -736,7 +794,7 @@ void showUsersViaBluetooth() {
         String line = file.readStringUntil('\n');
         line.trim();
        
-        int separatorPos = line.indexOf(',');
+        int separatorPos = line.indexOf(','); // Trova separatore username,password
         if (separatorPos > 0) {
           String username = line.substring(0, separatorPos);
           SerialBT.println("SISTEMA:- " + username + " (SD)");
@@ -750,7 +808,7 @@ void showUsersViaBluetooth() {
       SerialBT.println("SISTEMA:Controllare presenza file database.csv");
     }
   } else {
-    // Mostra utenti in memoria
+    // Mostra utenti hardcoded in memoria
     for (int i = 0; i < NUM_MEMORY_USERS; i++) {
       SerialBT.println("SISTEMA:- " + memoryUsers[i].username + " (memoria)");
     }
@@ -759,7 +817,9 @@ void showUsersViaBluetooth() {
   }
 }
 
+
 void showStats() {
+  // Statistiche generali sistema
   unsigned long uptime = millis() / 1000;
   SerialBT.println("SISTEMA:📊 STATISTICHE:");
   SerialBT.println("SISTEMA:⏱️  Uptime: " + String(uptime) + "s");
@@ -771,14 +831,16 @@ void showStats() {
   SerialBT.println("SISTEMA:💳 Database: " + String(sdCardAvailable ? "SD CARD" : "MEMORIA"));
   SerialBT.println("SISTEMA:📡 Sensore: " + String(sensorHealthy ? "OK" : "ERRORE"));
  
-  // Statistiche sensore
+  // Statistiche qualità sensore se disponibili
   if (sensorStats.totalMeasurements > 0) {
     float errorRate = (float)sensorStats.errorCount / sensorStats.totalMeasurements * 100;
     SerialBT.println("SISTEMA:📊 Errori sensore: " + String(errorRate, 1) + "%");
   }
 }
 
+
 void showSystemStatus() {
+  // Array nomi stati per debug leggibile
   String stateNames[] = {"IDLE", "VEICOLO_RILEVATO", "USERNAME", "PASSWORD",
                         "ACCESSO_OK", "ACCESSO_NEGATO", "SBARRA_APERTA", "ATTESA_CHIUSURA", "ERRORE_SENSORE"};
  
@@ -793,14 +855,16 @@ void showSystemStatus() {
     SerialBT.println("SISTEMA:👤 Utente corrente: " + currentUser);
   }
  
+  // Warning se sensore in errore
   if (!sensorHealthy) {
     SerialBT.println("SISTEMA:⚠️ ATTENZIONE: Sensore non funzionante!");
     SerialBT.println("SISTEMA:Utilizzare 'sensor-test' per diagnostica");
   }
 }
 
+
 void testLogin(String loginCommand) {
-  // Formato: login:username,password
+  // Parsing comando formato: login:username,password
   int colonPos = loginCommand.indexOf(':');
   if (colonPos == -1) {
     SerialBT.println("SISTEMA:Formato errato. Usa: login:username,password");
@@ -820,6 +884,7 @@ void testLogin(String loginCommand) {
  
   SerialBT.println("SISTEMA:🔐 Test login: " + username);
  
+  // Test credenziali senza attivare sbarra
   if (validateUserCredentials(username, password)) {
     SerialBT.println("SISTEMA:✅ LOGIN RIUSCITO!");
     SerialBT.println("SISTEMA:Credenziali valide per: " + username);
@@ -829,7 +894,9 @@ void testLogin(String loginCommand) {
   }
 }
 
+
 int countUsers() {
+  // Conta utenti in database attivo (SD o memoria)
   if (sdCardAvailable) {
     File file = SD_MMC.open("/database.csv");
     int count = 0;
@@ -837,77 +904,89 @@ int countUsers() {
       while (file.available()) {
         String line = file.readStringUntil('\n');
         line.trim();
-        if (line.indexOf(',') > 0) count++;
+        if (line.indexOf(',') > 0) count++; // Conta righe valide con separatore
       }
       file.close();
     }
     return count;
   } else {
-    return NUM_MEMORY_USERS;
+    return NUM_MEMORY_USERS; // Utenti hardcoded
   }
 }
 
+
 // ===== FUNZIONI AUTENTICAZIONE =====
 void handleUsernameValidation(String username) {
-  currentUser = username;
+  currentUser = username; // Salva per fase successiva
  
   if (validateUsername(username)) {
+    // Username trovato - procedi con password
     currentSystemState = REQUEST_PASSWORD;
     SerialBT.println("ACCESSO:Username '" + username + "' trovato!");
     SerialBT.println("ACCESSO:Inserisci la PASSWORD:");
     Serial.println("✓ Username valido: " + username);
   } else {
+    // Username non trovato - incrementa tentativi
     authAttempts++;
     SerialBT.println("ACCESSO:Username '" + username + "' NON trovato!");
    
     if (authAttempts >= MAX_AUTH_ATTEMPTS) {
+      // Troppi tentativi - blocca accesso
       SerialBT.println("ACCESSO:Troppi tentativi falliti. Accesso NEGATO!");
       Serial.println("✗ Troppi tentativi username errati");
       currentSystemState = ACCESS_DENIED;
     } else {
+      // Permetti nuovo tentativo
       SerialBT.println("ACCESSO:Riprova (tentativo " + String(authAttempts + 1) + "/" + String(MAX_AUTH_ATTEMPTS) + "):");
     }
   }
 }
 
+
 void handlePasswordValidation(String password) {
   if (validateUserCredentials(currentUser, password)) {
+    // Password corretta - autorizza accesso
     SerialBT.println("ACCESSO:PASSWORD CORRETTA!");
     SerialBT.println("ACCESSO:Benvenuto " + currentUser + "! Apertura in corso...");
     Serial.println("✓ Accesso autorizzato per: " + currentUser);
    
-    logAccess(currentUser, true);
+    logAccess(currentUser, true); // Log accesso riuscito
     currentSystemState = ACCESS_GRANTED;
   } else {
+    // Password errata
     authAttempts++;
     SerialBT.println("ACCESSO:PASSWORD ERRATA!");
    
     if (authAttempts >= MAX_AUTH_ATTEMPTS) {
+      // Troppi tentativi - nega accesso
       SerialBT.println("ACCESSO:Troppi tentativi falliti. Accesso NEGATO!");
       Serial.println("✗ Troppi tentativi password errati per: " + currentUser);
-      logAccess(currentUser, false);
+      logAccess(currentUser, false); // Log accesso negato
       currentSystemState = ACCESS_DENIED;
     } else {
+      // Permetti nuovo tentativo password
       SerialBT.println("ACCESSO:Riprova password (tentativo " + String(authAttempts + 1) + "/" + String(MAX_AUTH_ATTEMPTS) + "):");
     }
   }
 }
+
 
 // ===== GESTIONE DATABASE =====
 void initializeDatabase(bool sdAvailable) {
   sdCardAvailable = sdAvailable;
  
   if (sdCardAvailable) {
+    // Controllo esistenza file database
     if (!SD_MMC.exists("/database.csv")) {
       Serial.println("📄 File database.csv non trovato, creazione...");
-      createInitialDatabase();
+      createInitialDatabase(); // Crea database con utenti default
     } else {
       Serial.println("✓ Database database.csv trovato");
     }
    
-    // Mostra utenti disponibili (per debug)
-    displayAvailableUsers();
+    displayAvailableUsers(); // Mostra utenti per debug
   } else {
+    // Modalità fallback memoria RAM
     Serial.println("💾 Utilizzando database in memoria RAM");
     Serial.println("👥 Utenti disponibili in memoria:");
     for (int i = 0; i < NUM_MEMORY_USERS; i++) {
@@ -918,10 +997,12 @@ void initializeDatabase(bool sdAvailable) {
   }
 }
 
+
 void createInitialDatabase() {
+  // Creazione file CSV con utenti predefiniti
   File file = SD_MMC.open("/database.csv", FILE_WRITE);
   if (file) {
-    // Utenti dal database reale
+    // Scrittura utenti in formato CSV (username,password)
     file.println("nico,nico");
     file.println("leo,leo");
     file.println("luca,luca");
@@ -933,6 +1014,7 @@ void createInitialDatabase() {
     Serial.println("✗ ERRORE: Impossibile creare database.csv!");
   }
 }
+
 
 void displayAvailableUsers() {
   if (sdCardAvailable) {
@@ -957,18 +1039,20 @@ void displayAvailableUsers() {
       Serial.println("⚠️ Impossibile leggere database.csv");
     }
   }
-  // Se SD non disponibile, gli utenti sono già mostrati in initializeDatabase()
+  // Se SD non disponibile, utenti già mostrati in initializeDatabase()
 }
+
 
 bool validateUsername(String username) {
   if (sdCardAvailable) {
-    // Validazione da database.csv
+    // Validazione da file CSV su SD
     File file = SD_MMC.open("/database.csv");
     if (!file) {
       Serial.println("✗ Errore lettura database.csv!");
       return false;
     }
    
+    // Scansione file per trovare username
     while (file.available()) {
       String line = file.readStringUntil('\n');
       line.trim();
@@ -978,15 +1062,15 @@ bool validateUsername(String username) {
         String fileUsername = line.substring(0, separatorPos);
         if (fileUsername.equals(username)) {
           file.close();
-          return true;
+          return true; // Username trovato
         }
       }
     }
    
     file.close();
-    return false;
+    return false; // Username non trovato
   } else {
-    // Validazione da memoria
+    // Validazione da array in memoria
     for (int i = 0; i < NUM_MEMORY_USERS; i++) {
       if (memoryUsers[i].username.equals(username)) {
         return true;
@@ -996,15 +1080,17 @@ bool validateUsername(String username) {
   }
 }
 
+
 bool validateUserCredentials(String username, String password) {
   if (sdCardAvailable) {
-    // Validazione da database.csv
+    // Validazione completa da file CSV
     File file = SD_MMC.open("/database.csv");
     if (!file) {
       Serial.println("✗ Errore lettura database.csv!");
       return false;
     }
    
+    // Scansione per trovare coppia username/password
     while (file.available()) {
       String line = file.readStringUntil('\n');
       line.trim();
@@ -1014,17 +1100,18 @@ bool validateUserCredentials(String username, String password) {
         String fileUsername = line.substring(0, separatorPos);
         String filePassword = line.substring(separatorPos + 1);
        
+        // Match esatto di entrambi i campi
         if (fileUsername.equals(username) && filePassword.equals(password)) {
           file.close();
-          return true;
+          return true; // Credenziali valide
         }
       }
     }
    
     file.close();
-    return false;
+    return false; // Credenziali non valide
   } else {
-    // Validazione da memoria
+    // Validazione da array in memoria
     for (int i = 0; i < NUM_MEMORY_USERS; i++) {
       if (memoryUsers[i].username.equals(username) &&
           memoryUsers[i].password.equals(password)) {
@@ -1035,71 +1122,54 @@ bool validateUserCredentials(String username, String password) {
   }
 }
 
+
 // ===== CONTROLLO SBARRA =====
 void openGate() {
   Serial.println("🚪 Apertura sbarra...");
-  gateServo.write(SERVO_OPEN_ANGLE);
+  gateServo.write(SERVO_OPEN_ANGLE); // Movimento servo ad angolo apertura
   gateIsOpen = true;
-  gateOpenedTime = millis();
+  gateOpenedTime = millis(); // Timestamp per timer sicurezza
 }
 
 
 void closeGate() {
   Serial.println("🚪 Chiusura sbarra...");
-  gateServo.write(SERVO_CLOSED_ANGLE);
+  gateServo.write(SERVO_CLOSED_ANGLE); // Ritorno servo a posizione chiusa
   gateIsOpen = false;
-  resetToIdle();
+  resetToIdle(); // Reset completo sistema
 }
+
 
 // ===== GESTIONE TIMEOUT =====
 void checkTimeouts() {
   unsigned long currentTime = millis();
  
-  // Timeout autenticazione
+  // Timeout autenticazione utente
   if (authenticationInProgress &&
       (currentTime - authStartTime > AUTH_TIMEOUT)) {
     Serial.println("⏰ Timeout autenticazione");
     SerialBT.println("ACCESSO:Timeout! Riprova avvicinando il veicolo.");
-    resetToIdle();
+    resetToIdle(); // Reset per timeout
   }
  
-  // Timer chiusura sbarra (fallback se non gestito da GATE_WAITING_CLOSE)
+  // Timer sicurezza sbarra (fallback se altri timer falliscono)
   if (gateIsOpen && currentSystemState == GATE_OPERATING &&
       (currentTime - gateOpenedTime > GATE_OPEN_DURATION)) {
     Serial.println("⏰ Timer sicurezza sbarra - chiusura forzata");
-    closeGate();
-  }
-}
-
-// ===== LOG ACCESSI =====
-void logAccess(String username, bool success) {
-  String timestamp = String(millis() / 1000); // timestamp semplificato
-  String status = success ? "AUTORIZZATO" : "NEGATO";
- 
-  Serial.println("📝 Log: " + username + " - " + status);
- 
-  if (sdCardAvailable) {
-    // Salva su SD se disponibile
-    File logFile = SD_MMC.open("/log_accessi.txt", FILE_APPEND);
-    if (logFile) {
-      logFile.println(timestamp + "," + username + "," + status);
-      logFile.close();
-      Serial.println("📝 Log salvato su SD");
-    } else {
-      Serial.println("⚠️ Impossibile salvare log su SD");
-    }
-  } else {
-    Serial.println("⚠️ Log non salvato - SD non disponibile");
+    closeGate(); // Chiusura forzata per sicurezza
   }
 }
 
 // ===== RESET SISTEMA =====
 void resetToIdle() {
+  // Reset completo stato sistema a condizione iniziale
   authenticationInProgress = false;
   currentSystemState = IDLE_STATE;
   currentUser = "";
   authAttempts = 0;
-  vehicleLeftTime = 0;
+  // NON resettare vehicleLeftTime qui - serve per il timer di chiusura
  
   Serial.println("🔄 Sistema reset - Pronto per nuovo accesso");
 }
+
+
