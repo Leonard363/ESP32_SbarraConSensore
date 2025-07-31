@@ -8,12 +8,12 @@ Il sistema rileva la presenza di un veicolo, chiede l'autenticazione, controlla 
 ### 📑 Indice
 
 - [⚙️ Funzionalità principali](#️-funzionalità-principali)
-- [🧩 Componenti utilizzati](#️-componenti-utilizzati)
-- [🔄 Funzionamento generale](#-funzionamento-generale)
+- [🧩 Componenti utilizzati](-Componenti-utilizzati)
+- [🔄 Funzionamento generale](#funzionamento-generale)
   - [🧪 Diagnostica iniziale](#-diagnostica-iniziale)
-  - [🚗 Rilevamento veicolo](#1-🚗-rilevamento-veicolo)
-  - [🔐 Autenticazione via Bluetooth](#2-🔐-autenticazione-via-bluetooth)
-  - [📤 Verifica e controllo della sbarra](#3-📤-verifica-e-controllo-della-sbarra)
+  - [🚗 Rilevamento veicolo](#-rilevamento-veicolo)
+  - [🔐 Autenticazione via Bluetooth](#-autenticazione-via-bluetooth)
+  - [📤 Verifica e controllo della sbarra](#-verifica-e-controllo-della-sbarra)
 - [🗂️ Database utenti](#️-database-utenti)
 - [📲 Interfaccia utente](#-interfaccia-utente)
 - [💬 Comandi via Bluetooth](#-comandi-per-diagnostica-via-bluetooth)
@@ -53,7 +53,7 @@ Il sistema rileva la presenza di un veicolo, chiede l'autenticazione, controlla 
 
 </br>
 
-##  Funzionamento generale
+## Funzionamento generale
 
 ### 🧪 Diagnostica iniziale
 
@@ -68,13 +68,13 @@ All’accensione, il sistema esegue un controllo completo di tutte le componenti
 
 </br>
 
-### 1. 🚗 Rilevamento veicolo
+### 🚗 Rilevamento veicolo
 
 Il sensore a ultrasuoni è sempre attivo. Se rileva una macchina a meno di **20 cm**, il sistema attiva la procedura di autenticazione.
 
 </br>
 
-### 2. 🔐 Autenticazione via Bluetooth
+### 🔐 Autenticazione via Bluetooth
 
 - L’ESP32 invia una richiesta via Bluetooth allo smartphone.
 - L’utente inserisce `username,password`.
@@ -83,7 +83,7 @@ Il sensore a ultrasuoni è sempre attivo. Se rileva una macchina a meno di **20 
 
 </br>
 
-### 3. 📤 Verifica e controllo della sbarra
+### 📤 Verifica e controllo della sbarra
 
 - ✅ **Accesso corretto:** il servomotore apre la sbarra. Dopo il passaggio del veicolo, si richiude automaticamente.
 - ❌ **Accesso errato:** la sbarra resta chiusa. Dopo 3 tentativi falliti consecutivi, il sistema si blocca per alcuni secondi prima di permettere un nuovo accesso.
