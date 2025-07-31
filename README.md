@@ -147,7 +147,8 @@ Si interagisce con il sistema tramite uno smartphone e un'app Bluetooth (es. **S
 ---
 
 ### 📸 Screenshot
-
+![Circuito](https://github.com/user-attachments/assets/0b5141d6-85ec-4323-8dca-c527ed7891f2)
+![Circuito](https://github.com/user-attachments/assets/2f226ee1-58a3-43b9-bc76-87640a3da5bc)
 
 </br>
 
