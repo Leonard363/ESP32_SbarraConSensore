@@ -1,27 +1,23 @@
 #include "BluetoothSerial.h"
 #include "FS.h"
-#include "SD_MMC.h"  // Utilizza interfaccia MMC per prestazioni migliori
+#include "SD_MMC.h"  
 #include "SPI.h"
 #include <ESP32Servo.h>
-
 
 // ===== CONFIGURAZIONE PIN =====
 #define TRIG_PIN 0        // Trigger sensore ultrasuoni - genera impulso 10µs
 #define ECHO_PIN 33       // Echo sensore ultrasuoni - riceve risposta temporizzata
 #define SERVO_PIN 13      // PWM per controllo servo motore sbarra
 
-
 // ===== CONFIGURAZIONE SD_MMC =====
 #define SD_MMC_CMD 15     // Linea comando SD - protocollo MMC
 #define SD_MMC_CLK 14     // Clock sincronizzazione dati
 #define SD_MMC_D0 2       // Linea dati 0 (modalità 1-bit)
 
-
 // ===== CONFIGURAZIONE SENSORE =====
 #define DISTANCE_THRESHOLD 20    // Soglia rilevamento veicolo (cm)
 #define MIN_DETECTION_TIME 3000  // Filtro anti-rimbalzo per conferma presenza (ms)
 #define MAX_DISTANCE 400         // Limite massimo lettura valida sensore (cm)
-
 
 // ===== CONFIGURAZIONE DIAGNOSTICA SENSORE =====
 #define SENSOR_TEST_SAMPLES 10      // Campioni per test affidabilità
@@ -31,22 +27,18 @@
 #define SENSOR_STABILITY_SAMPLES 5  // Campioni per calcolo stabilità
 #define SENSOR_VARIANCE_THRESHOLD 10 // Varianza massima per sensore stabile (cm)
 
-
 // ===== CONFIGURAZIONE SERVO =====
 #define SERVO_CLOSED_ANGLE 0     // Posizione sbarra chiusa (gradi)
 #define SERVO_OPEN_ANGLE 90      // Posizione sbarra aperta (gradi)
 #define GATE_OPEN_DURATION 5000  // Tempo massimo apertura (sicurezza)
 #define GATE_DELAY_CLOSE 5000    // Ritardo chiusura dopo uscita veicolo
 
-
 // ===== CONFIGURAZIONE SICUREZZA =====
 #define MAX_AUTH_ATTEMPTS 3      // Limite tentativi per sessione (anti-brute force)
 #define AUTH_TIMEOUT 10000       // Timeout autenticazione utente (ms)
 
-
 BluetoothSerial SerialBT;
 Servo gateServo;
-
 
 // ===== VARIABILI STATO SISTEMA =====
 bool vehiclePresent = false;           // Flag presenza veicolo
@@ -61,7 +53,6 @@ int authAttempts = 0;                 // Contatore tentativi falliti
 int messageCount = 0;                 // Statistiche messaggi Bluetooth
 bool sdCardAvailable = false;         // Flag disponibilità storage persistente
 
-
 // ===== VARIABILI DIAGNOSTICA SENSORE =====
 bool sensorHealthy = true;            // Stato generale sensore
 int consecutiveErrors = 0;            // Contatore errori sequenziali
@@ -70,7 +61,6 @@ unsigned long errorReadings = 0;      // Totale letture errate
 unsigned long lastSensorTest = 0;     // Timestamp ultimo test diagnostico
 float lastValidDistance = -1;         // Ultima lettura valida per reference
 bool sensorCalibrated = false;        // Flag calibrazione completata
-
 
 // ===== STRUTTURA STATISTICHE SENSORE =====
 struct SensorStats {
@@ -84,26 +74,20 @@ struct SensorStats {
 };
 SensorStats sensorStats = {0, 0, 0, 999.0, 0.0, 0.0, 0};
 
-
 // ===== DATABASE FALLBACK IN MEMORIA =====
 struct MemoryUser {
   String username;
   String password;
 };
 
-
 // Database hardcoded per funzionamento senza SD
 MemoryUser memoryUsers[] = {
-  {"nico", "nico"},
-  {"leo", "leo"},
-  {"luca", "luca"},
-  {"pietro", "pietro"},
-  {"spezzino", "dimerda"}
+  {"user1", "user1"}, 
+  {"user2", "user2"}
 };
 
 
 const int NUM_MEMORY_USERS = sizeof(memoryUsers) / sizeof(memoryUsers[0]);
-
 
 // ===== MACCHINA A STATI SISTEMA =====
 enum SystemState {
@@ -554,7 +538,6 @@ void processBluetoothMessages() {
     }
   }
 }
-
 
 // ===== FUNZIONI BLUETOOTH TEST/DEBUG =====
 void processTestCommand(String command) {
@@ -1131,7 +1114,6 @@ void openGate() {
   gateOpenedTime = millis(); // Timestamp per timer sicurezza
 }
 
-
 void closeGate() {
   Serial.println("🚪 Chiusura sbarra...");
   gateServo.write(SERVO_CLOSED_ANGLE); // Ritorno servo a posizione chiusa
@@ -1171,5 +1153,3 @@ void resetToIdle() {
  
   Serial.println("🔄 Sistema reset - Pronto per nuovo accesso");
 }
-
-
