@@ -45,6 +45,7 @@ Il sistema rileva la presenza di un veicolo, chiede l'autenticazione, controlla 
 | **Servomotore**    | Apre e chiude fisicamente la sbarra                      |
 | **Modulo Bluetooth** | Per comunicazione con smartphone                        |
 | **Scheda SD**      | Contiene il file con il database utenti/password         |
+| **Pila da 5V** | Alimentazione aggiuntiva                                    |
 | **Breadboard e cavi** | Collegamenti per prototipazione                      |
 
 </br>
